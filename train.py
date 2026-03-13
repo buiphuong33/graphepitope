@@ -82,8 +82,6 @@ trainer = pl.Trainer(
     callbacks=cb,
     logger=logger,
     check_val_every_n_epoch=1,
-    log_every_n_steps=1000,
-    enable_progress_bar=False
 )
 
 if os.path.exists(f'./model/{log_name}/model_{args.fold}.ckpt'):
