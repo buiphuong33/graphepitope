@@ -1,3 +1,4 @@
+#model.py
 import os
 import torch
 import torch.nn as nn
@@ -8,7 +9,7 @@ from HGNN import HierarchicalGNN
 class GraphBepi(pl.LightningModule):
     def __init__(
         self, 
-        feat_dim=1280, 
+        feat_dim=2560, 
         exfeat_dim=1280, 
         hidden_dim=256, 
         augment_eps=0.05, 

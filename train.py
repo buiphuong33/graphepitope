@@ -1,3 +1,4 @@
+#train.py
 import os
 import torch
 import random
@@ -62,7 +63,7 @@ log_name = f'{args.dataset}_{args.tag}'
 metrics = METRICS(f'cuda:{args.gpu}' if args.gpu != -1 else 'cpu')
 
 model = GraphBepi(
-    feat_dim=1280,
+    feat_dim=2560,
     exfeat_dim=1280,
     hidden_dim=args.hidden,
     hcl_weight=args.hcl,
