@@ -84,7 +84,7 @@ class GraphBepi(pl.LightningModule):
         loss_hcl = self.compute_hcl_loss(layer_feats, y)
         total_loss = loss_bce + self.hcl_weight * loss_hcl
 
-        self.log('train_loss', total_loss, on_epoch=True, prog_bar=True)
+        self.log('train_loss', total_loss, on_epoch=True, prog_bar=False)
         if self.metrics is not None:
             result = self.metrics.calc_prc(pred.detach(), y.detach())
             self.log('train_auc', result['AUROC'], on_epoch=True)
@@ -105,12 +105,12 @@ class GraphBepi(pl.LightningModule):
         self.val_preds.clear(); self.val_labels.clear()
 
         loss = self.loss_fn(pred, y.float())
-        self.log('val_loss', loss, on_epoch=True, prog_bar=True)
+        self.log('val_loss', loss, on_epoch=True, prog_bar=False)
 
         if self.metrics is not None:
             result = self.metrics(pred, y)
             for k, v in result.items():
-                self.log(f'val_{k}', v, on_epoch=True, prog_bar=True)
+                self.log(f'val_{k}', v, on_epoch=True, prog_bar=False)
 
     def test_step(self, batch, batch_idx):
         x, pos, y, batch_ptr = batch.x, batch.pos, batch.y, batch.batch
