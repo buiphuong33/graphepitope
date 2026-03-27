@@ -111,7 +111,6 @@ if __name__ == "__main__":
     print("[INFO] Processing Testset...")
     testset = initial_epitope3D(args.test_csv, root, model, device)
         
-    # Lọc các chuỗi quá dài hoặc không có epitope
     trainset = [i for i in trainset if len(i) < 1024 and getattr(i, 'label', None) is not None and i.label.sum() > 0]
     testset = [i for i in testset if len(i) < 1024 and getattr(i, 'label', None) is not None and i.label.sum() > 0]
 
