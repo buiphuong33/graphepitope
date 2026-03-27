@@ -1,36 +1,85 @@
-#HGNN.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, GATConv, SAGEConv
 from torch_cluster import radius_graph, knn_graph
 
-class HierarchicalGNN(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.shallow_conv = GCNConv(in_channels, out_channels)
-        self.medium_conv = GATConv(in_channels, out_channels // 4, heads=4)
-        self.deep_conv = SAGEConv(in_channels, out_channels)
 
-        # Gate nhận vào concat của 3 đặc trưng (3 * out_channels)
-        self.gate = nn.Linear(out_channels * 3, 3)
+class HGNNBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, dropout=0.2):
+        super().__init__()
+        
+        self.gcn = GCNConv(in_channels, out_channels)
+        self.gat = GATConv(in_channels, out_channels // 4, heads=4)
+        self.sage = SAGEConv(in_channels, out_channels)
+
+        self.lin = nn.Linear(out_channels * 3, out_channels)
         self.norm = nn.LayerNorm(out_channels)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, edge_shallow, edge_medium, edge_deep):
+        z1 = F.elu(self.gcn(x, edge_shallow))
+        z2 = F.elu(self.gat(x, edge_medium))
+        z3 = F.elu(self.sage(x, edge_deep))
+
+        z = torch.cat([z1, z2, z3], dim=-1)
+        z = self.lin(z)
+        z = self.norm(z)
+        z = self.dropout(z)
+
+        return z, [z1, z2, z3]
+
+
+class HierarchicalGNN(nn.Module):
+    def __init__(self, in_channels, hidden_channels, num_layers=3, dropout=0.2):
+        super().__init__()
+
+        self.num_layers = num_layers
+
+        self.input_proj = nn.Linear(in_channels, hidden_channels)
+
+        self.layers = nn.ModuleList([
+            HGNNBlock(hidden_channels, hidden_channels, dropout)
+            for _ in range(num_layers)
+        ])
+
+        # Deep gating (attention-like)
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_channels * num_layers, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, num_layers),
+            nn.Softmax(dim=-1)
+        )
+
+        self.norm = nn.LayerNorm(hidden_channels)
 
     def forward(self, x, pos, batch_index=None):
-        edge_index_shallow = radius_graph(pos, r=6.0, batch=batch_index, loop=False)
-        edge_index_medium = radius_graph(pos, r=10.0, batch=batch_index, loop=False)
-        edge_index_deep = knn_graph(pos, k=20, batch=batch_index, loop=False)
+        # Graph construction (shared across layers)
+        edge_shallow = radius_graph(pos, r=6.0, batch=batch_index, loop=False)
+        edge_medium = radius_graph(pos, r=10.0, batch=batch_index, loop=False)
+        edge_deep = knn_graph(pos, k=20, batch=batch_index, loop=False)
 
-        z1 = F.elu(self.shallow_conv(x, edge_index_shallow))
-        z2 = F.elu(self.medium_conv(x, edge_index_medium))
-        z3 = F.elu(self.deep_conv(x, edge_index_deep))
+        x = self.input_proj(x)
 
-        combined = torch.cat([z1, z2, z3], dim=-1)
-        gate_weights = F.softmax(self.gate(combined), dim=-1)
-        
-        # Cộng có trọng số
-        z_final = (gate_weights[:, 0:1] * z1 + 
-                   gate_weights[:, 1:2] * z2 + 
-                   gate_weights[:, 2:3] * z3)
-        
-        return [z1, z2, z3], self.norm(z_final)
+        layer_outputs = []
+        all_scale_outputs = []
+
+        for layer in self.layers:
+            res = x
+            x, scale_out = layer(x, edge_shallow, edge_medium, edge_deep)
+            
+            # Residual connection
+            x = x + res
+
+            layer_outputs.append(x)
+            all_scale_outputs.extend(scale_out)
+
+        # ===== Multi-layer fusion =====
+        stacked = torch.cat(layer_outputs, dim=-1)  # [N, L*hidden]
+        gate_weights = self.gate(stacked)           # [N, L]
+
+        z_final = 0
+        for i in range(self.num_layers):
+            z_final += gate_weights[:, i:i+1] * layer_outputs[i]
+
+        return all_scale_outputs, self.norm(z_final)
