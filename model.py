@@ -59,7 +59,7 @@ class GraphBepi(pl.LightningModule):
         return hcl_loss
 
     def forward(self, x, pos, batch_idx=None):
-        esm_feat = x[:, :-self.hparams.exfeat_dim]
+        esm_feat = x[:, :-self.hparams.feat_dim]
         saprot_feat = x[:, -self.hparams.exfeat_dim:]
 
         v = F.elu(self.W_v(esm_feat))
