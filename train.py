@@ -11,7 +11,8 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 from tool import METRICS
 from model import GraphBepi
-from dataset import PDB, collate_fn
+from dataset import PDB
+from utils import collate_fn
 
 warnings.simplefilter('ignore')
 
