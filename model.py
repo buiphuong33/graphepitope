@@ -40,7 +40,7 @@ class GraphBepi(pl.LightningModule):
             nn.Linear(hidden_dim, 2)
         )
         self.mlp=nn.Sequential(
-            nn.Linear(4*hidden_dim,hidden_dim,bias=True),
+            nn.Linear(3*hidden_dim,hidden_dim,bias=True),
             nn.ReLU(),
             nn.Linear(hidden_dim,1,bias=True),
             nn.Sigmoid()
