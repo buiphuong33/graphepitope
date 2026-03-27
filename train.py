@@ -66,6 +66,7 @@ model = GraphBepi(
     feat_dim=2560,
     exfeat_dim=1280,
     hidden_dim=args.hidden,
+    num_layers=3,
     hcl_weight=args.hcl,
     augment_eps=0.05,
     dropout=0.2,
