@@ -99,7 +99,7 @@ class GraphBepi(pl.LightningModule):
             edge_weight = edge_weight / (edge_weight.max() + 1e-6)
             edge_weight = edge_weight[edge_index[0], edge_index[1]]
 
-            Fregion = self.gat_mid(x, edge_index, edge_weight=edge_weight)
+            Fregion = self.gat_mid(x, edge_index)
 
             # ===== GLOBAL =====
             Fglobal = self.sage_global(x, edge_index)
