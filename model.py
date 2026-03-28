@@ -95,6 +95,7 @@ class GraphBepi(pl.LightningModule):
             edge_index = (edge[i].sum(-1) > 0).nonzero(as_tuple=False).t().contiguous()  # (2, E) where E is number of edges
 
             # normalize
+            edge_weight = edge[i].sum(-1)
             edge_weight = edge_weight / (edge_weight.max() + 1e-6)
             edge_weight = edge_weight[edge_index[0], edge_index[1]]
 
