@@ -6,6 +6,7 @@ import pytorch_lightning as pl
 import torch.nn.functional as F
 from EGAT import EGAT,AE
 from torch.nn.utils.rnn import pad_sequence,pack_sequence,pack_padded_sequence,pad_packed_sequence
+from torch_geometric.nn import GATv2Conv, SAGEConv
 class GraphBepi(pl.LightningModule):
     def __init__(
         self, 
@@ -33,7 +34,26 @@ class GraphBepi(pl.LightningModule):
             nn.Linear(edge_dim,hidden_dim//4, bias=True),
             nn.ELU(),
         )
-        self.gat=EGAT(hidden_dim,hidden_dim,hidden_dim//4,dropout)
+        # (A) Local EGAT
+        self.egat_local = EGAT(hidden_dim, hidden_dim, hidden_dim//4, dropout)
+        self.proj_local = nn.Linear(hidden_dim, hidden_dim)
+
+        # (B) Mid GATv2
+        self.gat_mid = GATv2Conv(
+            hidden_dim,
+            hidden_dim,
+            heads=4,
+            concat=False
+        )
+        self.fusion_attn = nn.Sequential(
+            nn.Linear(hidden_dim*3, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 3)
+        )
+
+        # (C) Global GraphSAGE
+        self.sage_global = SAGEConv(hidden_dim, hidden_dim)
+
         self.feature_gate = nn.Sequential(
             nn.Linear(2*hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -67,14 +87,36 @@ class GraphBepi(pl.LightningModule):
             x_cat = torch.cat([x1, x2], dim=-1) 
             gate = torch.softmax(self.feature_gate(x_cat), dim=-1)
             x = gate[:, 0:1] * x1 + gate[:, 1:2] * x2
-            x_gcn,E=self.gat(x,E)
-            x_gcns.append(x_gcn)
+            # ===== LOCAL =====
+            Flocal, _ = self.egat_local(x, E)
+            Flocal = self.proj_local(Flocal)
+
+            # ===== MID (cần edge_index) =====
+            edge_index = (edge[i].sum(-1) > 0).nonzero(as_tuple=False).t().contiguous()  # (2, E) where E is number of edges
+
+            # normalize
+            edge_weight = edge_weight / (edge_weight.max() + 1e-6)
+            edge_weight = edge_weight[edge_index[0], edge_index[1]]
+
+            Fregion = self.gat_mid(x, edge_index, edge_weight=edge_weight)
+
+            # ===== GLOBAL =====
+            Fglobal = self.sage_global(x, edge_index)
+
+            # ===== CONCAT =====
+            Fcat = torch.cat([Flocal, Fregion, Fglobal], dim=-1)
+            beta = torch.softmax(self.fusion_attn(Fcat), dim=-1)
+
+            Ffinal = (
+                beta[:, 0:1] * Flocal +
+                beta[:, 1:2] * Fregion +
+                beta[:, 2:3] * Fglobal
+            )
+
+            x_gcns.append(Ffinal)
         
-        x_attns=torch.cat([feats,exfeats],-1)
         
-        x_attns=[x_attns[i,:mask[i]] for i in range(len(x_attns))]
-        h=[torch.cat([x_attn,x_gcn],-1) for x_attn,x_gcn in zip(x_attns,x_gcns)]
-        h=torch.cat(h,0)
+        h=torch.cat(x_gcns,0)
         return self.mlp(h)
 
     def embed(self, V, edge):
