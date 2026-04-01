@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from EGAT import EGAT,AE
 from torch.nn.utils.rnn import pad_sequence,pack_sequence,pack_padded_sequence,pad_packed_sequence
 from torch_geometric.nn import GATv2Conv, SAGEConv
+from torch_geometric.utils import add_self_loops
 class GraphBepi(pl.LightningModule):
     def __init__(
         self, 
@@ -21,7 +22,7 @@ class GraphBepi(pl.LightningModule):
         self.val_preds, self.val_labels = [], []
         self.test_preds, self.test_labels = [], []
         # loss function
-        self.loss_fn=nn.BCELoss()
+        self.loss_fn=nn.BCEWithLogitsLoss()
         # Hyperparameters
         self.exfeat_dim=exfeat_dim
         self.augment_eps = augment_eps
@@ -43,7 +44,8 @@ class GraphBepi(pl.LightningModule):
             hidden_dim,
             hidden_dim,
             heads=4,
-            concat=False
+            concat=False,
+            edge_dim=hidden_dim//4
         )
         self.fusion_attn = nn.Sequential(
             nn.Linear(hidden_dim*3, hidden_dim),
@@ -52,7 +54,13 @@ class GraphBepi(pl.LightningModule):
         )
 
         # (C) Global GraphSAGE
-        self.sage_global = SAGEConv(hidden_dim, hidden_dim)
+        self.gat_global = GATv2Conv(
+            hidden_dim,
+            hidden_dim,
+            heads=1,
+            concat=False,
+            edge_dim=hidden_dim//4
+        )
 
         self.feature_gate = nn.Sequential(
             nn.Linear(2*hidden_dim, hidden_dim),
@@ -63,7 +71,7 @@ class GraphBepi(pl.LightningModule):
             nn.Linear(hidden_dim,hidden_dim,bias=True),
             nn.ReLU(),
             nn.Linear(hidden_dim,1,bias=True),
-            nn.Sigmoid()
+            #nn.Sigmoid()
         )
         # Initialization
         for p in self.parameters():
@@ -81,30 +89,80 @@ class GraphBepi(pl.LightningModule):
         mask=mask.sum(1)
         feats,exfeats=self.W_v(V[:,:,:-self.exfeat_dim]),self.W_u1(V[:,:,-self.exfeat_dim:])
         x_gcns=[]
+        # for i in range(len(V)):
+        #     E=self.edge_linear(edge[i]).permute(2,0,1)
+        #     x1,x2=feats[i,:mask[i]],exfeats[i,:mask[i]]
+        #     x_cat = torch.cat([x1, x2], dim=-1) 
+        #     gate = torch.softmax(self.feature_gate(x_cat), dim=-1)
+        #     x = gate[:, 0:1] * x1 + gate[:, 1:2] * x2
+        #     # ===== LOCAL =====
+        #     Flocal, _ = self.egat_local(x, E)
+        #     Flocal = self.proj_local(Flocal)
+
+        #     # ===== MID (cần edge_index) =====
+        #     edge_index = (edge[i].sum(-1) > 0).nonzero(as_tuple=False).t().contiguous()  # (2, E) where E is number of edges
+
+        #     # normalize
+        #     edge_weight = edge[i].sum(-1)
+        #     edge_weight = edge_weight / (edge_weight.max() + 1e-6)
+        #     edge_weight = edge_weight[edge_index[0], edge_index[1]]
+
+        #     Fregion = self.gat_mid(x, edge_index)
+
+        #     # ===== GLOBAL =====
+        #     Fglobal = self.sage_global(x, edge_index)
+
+        #     # ===== CONCAT =====
+        #     Fcat = torch.cat([Flocal, Fregion, Fglobal], dim=-1)
+        #     beta = torch.softmax(self.fusion_attn(Fcat), dim=-1)
+
+        #     Ffinal = (
+        #         beta[:, 0:1] * Flocal +
+        #         beta[:, 1:2] * Fregion +
+        #         beta[:, 2:3] * Fglobal
+        #     )
+
+        #     x_gcns.append(Ffinal)
         for i in range(len(V)):
-            E=self.edge_linear(edge[i]).permute(2,0,1)
-            x1,x2=feats[i,:mask[i]],exfeats[i,:mask[i]]
-            x_cat = torch.cat([x1, x2], dim=-1) 
-            gate = torch.softmax(self.feature_gate(x_cat), dim=-1)
-            x = gate[:, 0:1] * x1 + gate[:, 1:2] * x2
-            # ===== LOCAL =====
-            Flocal, _ = self.egat_local(x, E)
+            E_dense = edge[i]
+
+            x1 = feats[i,:mask[i]]
+            x2 = exfeats[i,:mask[i]]
+
+            # ===== Feature fusion (giữ concat) =====
+            x = torch.cat([x1, x2], dim=-1)
+            x = F.layer_norm(x, x.shape[-1:])   # thêm normalize
+            x = self.W_v(x[:, :self.W_v.in_features])  # đưa về hidden_dim
+
+            # ===== EDGE FEATURE =====
+            E_feat_dense = self.edge_linear(E_dense)   # (N, N, hidden_dim//4)
+
+            # ===== LOCAL (EGAT) =====
+            E_local = E_feat_dense.permute(2,0,1)
+            Flocal, _ = self.egat_local(x, E_local)
             Flocal = self.proj_local(Flocal)
 
-            # ===== MID (cần edge_index) =====
-            edge_index = (edge[i].sum(-1) > 0).nonzero(as_tuple=False).t().contiguous()  # (2, E) where E is number of edges
+            # ===== SPARSE GRAPH =====
+            edge_index = (E_dense.sum(-1) > 0).nonzero(as_tuple=False).t().contiguous()
 
-            # normalize
-            edge_weight = edge[i].sum(-1)
-            edge_weight = edge_weight / (edge_weight.max() + 1e-6)
-            edge_weight = edge_weight[edge_index[0], edge_index[1]]
+            # 🔥 FIX: lấy đúng edge feature vector
+            E_feat = E_feat_dense[edge_index[0], edge_index[1]]
 
-            Fregion = self.gat_mid(x, edge_index)
+            # ===== ADD SELF LOOP =====
+            edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+
+            # ===== MID =====
+            Fregion = self.gat_mid(x, edge_index, edge_attr=E_feat)
 
             # ===== GLOBAL =====
-            Fglobal = self.sage_global(x, edge_index)
+            Fglobal = self.gat_global(x, edge_index, edge_attr=E_feat)
 
-            # ===== CONCAT =====
+            # ===== RESIDUAL từng nhánh =====
+            Flocal = Flocal + x
+            Fregion = Fregion + x
+            Fglobal = Fglobal + x
+
+            # ===== FUSION =====
             Fcat = torch.cat([Flocal, Fregion, Fglobal], dim=-1)
             beta = torch.softmax(self.fusion_attn(Fcat), dim=-1)
 
@@ -114,7 +172,8 @@ class GraphBepi(pl.LightningModule):
                 beta[:, 2:3] * Fglobal
             )
 
-            x_gcns.append(Ffinal)
+            # ===== FINAL RESIDUAL =====
+            x_gcns.append(Ffinal + x)
         
         
         h=torch.cat(x_gcns,0)
