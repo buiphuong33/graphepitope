@@ -73,6 +73,8 @@ class GraphBepi(pl.LightningModule):
             nn.Linear(hidden_dim,1,bias=True),
             #nn.Sigmoid()
         )
+        self.feature_compression = nn.Linear(2 * hidden_dim, hidden_dim)
+        
         # Initialization
         for p in self.parameters():
             if p.dim() > 1:
@@ -132,7 +134,8 @@ class GraphBepi(pl.LightningModule):
             # ===== Feature fusion (giữ concat) =====
             x = torch.cat([x1, x2], dim=-1)
             x = F.layer_norm(x, x.shape[-1:])   # thêm normalize
-            x = self.W_v(x[:, :self.W_v.in_features])  # đưa về hidden_dim
+            x = self.feature_compression(x)
+            #x = self.W_v(x[:, :self.W_v.in_features])  # đưa về hidden_dim
 
             # ===== EDGE FEATURE =====
             E_feat_dense = self.edge_linear(E_dense)   # (N, N, hidden_dim//4)
@@ -150,7 +153,9 @@ class GraphBepi(pl.LightningModule):
 
             # ===== ADD SELF LOOP =====
             edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
-
+            # thêm edge_attr cho self-loop
+            self_loop_attr = torch.zeros(x.size(0), E_feat.size(-1), device=x.device)
+            E_feat = torch.cat([E_feat, self_loop_attr], dim=0)
             # ===== MID =====
             Fregion = self.gat_mid(x, edge_index, edge_attr=E_feat)
 
