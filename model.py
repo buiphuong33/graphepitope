@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import torch.nn.functional as F
-from EGAT import EGAT,AE
+from EGAT import EGAT,AE, HierarchicalPooling
 from torch.nn.utils.rnn import pad_sequence,pack_sequence,pack_padded_sequence,pad_packed_sequence
 class GraphBepi(pl.LightningModule):
     def __init__(
