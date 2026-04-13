@@ -75,3 +75,53 @@ class EGAT(nn.Module):
         x, edge_attr=self.in_att(x, edge_attr)
         x, edge_attr=self.out_att(x, edge_attr)
         return x+x_cut, edge_attr
+
+
+class HierarchicalPooling(nn.Module):
+    def __init__(self, hidden_dim, pool_ratio=8, max_nodes=1024):
+        """
+        pool_ratio: Tỷ lệ gom nhóm (vd = 8 nghĩa là trung bình 8 axit amin tạo thành 1 patch)
+        """
+        super().__init__()
+        self.pool_ratio = pool_ratio
+        self.max_k = max_nodes // pool_ratio
+        
+        # Học ma trận phân cụm S (Assignment Matrix)
+        self.assign_mat = nn.Linear(hidden_dim, self.max_k)
+        
+        # GCN ở cấp độ vĩ mô (Patch-level)
+        self.macro_gcn = nn.Linear(hidden_dim, hidden_dim)
+        self.layernorm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x, adj):
+        # x: (L, hidden_dim) - Đặc trưng sau khi qua EGAT
+        # adj: (L, L) - Ma trận kề của protein
+        L = x.shape[0]
+        K = max(1, L // self.pool_ratio)
+        K = min(K, self.max_k)
+        
+        # 1. Tính ma trận gán S: (L, K)
+        # Softmax theo dimension -1 để đảm bảo tổng xác suất 1 node thuộc về các patch = 1
+        S = self.assign_mat(x)[:, :K] 
+        S = torch.softmax(S, dim=-1) 
+        
+        # 2. Graph Pooling (Tạo Super-nodes)
+        # Gom đặc trưng node thành đặc trưng patch
+        X_macro = S.transpose(0, 1) @ x  # (K, hidden_dim)
+        # Tạo ma trận kề giữa các patch
+        A_macro = S.transpose(0, 1) @ adj @ S  # (K, K)
+        
+        # Chuẩn hóa A_macro để tránh bùng nổ gradient
+        rowsum = A_macro.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+        A_macro = A_macro / rowsum
+        
+        # 3. Macro Message Passing (Truyền tin giữa các Patches)
+        X_macro = self.macro_gcn(A_macro @ X_macro)
+        X_macro = F.relu(X_macro)
+        
+        # 4. Graph Unpooling (Broadcast thông tin từ Patch về lại Residues)
+        X_global = S @ X_macro  # (L, hidden_dim)
+        
+        # 5. Kết hợp đặc trưng cục bộ (x) và toàn cục (X_global)
+        out = self.layernorm(x + X_global)
+        return out

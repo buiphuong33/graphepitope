@@ -155,8 +155,9 @@ class chain:
 def collate_fn(batch):
     edges = [item['edge'] for item in batch]
     feats = [item['feat'] for item in batch]
+    adjs = [item['adj'] for item in batch]
     labels = torch.cat([item['label'] for item in batch],0)
-    return feats,edges,labels
+    return feats,edges, adjs, labels
 
 def extract_chain(root,pid,chain,force=False):
     if not force and os.path.exists(f'{root}/purePDB/{pid}_{chain}.pdb'):
