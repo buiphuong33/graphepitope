@@ -51,7 +51,7 @@ class GraphBepi(pl.LightningModule):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, V, edge):
+    def forward(self, V, edge, adj):
         h=[]
         V = pad_sequence(V, batch_first=True, padding_value=0).float()
         mask=V.sum(-1)!=0
