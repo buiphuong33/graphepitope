@@ -34,7 +34,7 @@ class GraphBepi(pl.LightningModule):
             nn.ELU(),
         )
         self.gat=EGAT(hidden_dim,hidden_dim,hidden_dim//4,dropout)
-        self.hpool = HierarchicalPooling(hidden_dim=hidden_dim, pool_ratio=8)
+        self.hpool = HierarchicalPooling(hidden_dim=hidden_dim, pool_ratio=4)
         self.feature_gate = nn.Sequential(
             nn.Linear(2*hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -69,9 +69,11 @@ class GraphBepi(pl.LightningModule):
             x_cat = torch.cat([x1, x2], dim=-1) 
             gate = torch.softmax(self.feature_gate(x_cat), dim=-1)
             x = gate[:, 0:1] * x1 + gate[:, 1:2] * x2
-            x_gcn,E=self.gat(x,E)
-            x_gcn = self.hpool(x_gcn, A)
-            x_gcns.append(x_gcn)
+            x_local,E=self.gat(x,E)
+            x_pool, adj_pool, S = self.hpool(x_gcn, A)
+            x_global = torch.matmul(S, x_pool)
+            x_gcn_final = x_local + x_global
+            x_gcns.append(x_gcn_final)
         
         x_attns=torch.cat([feats,exfeats],-1)
         
