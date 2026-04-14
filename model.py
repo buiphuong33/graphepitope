@@ -70,9 +70,7 @@ class GraphBepi(pl.LightningModule):
             gate = torch.softmax(self.feature_gate(x_cat), dim=-1)
             x = gate[:, 0:1] * x1 + gate[:, 1:2] * x2
             x_local,E=self.gat(x,E)
-            x_pool, adj_pool, S = self.hpool(x_local, A)
-            x_global = torch.matmul(S, x_pool)
-            x_gcn_final = x_local + x_global
+            x_gcn_final = self.hpool(x_local, A)
             x_gcns.append(x_gcn_final)
         
         x_attns=torch.cat([feats,exfeats],-1)
