@@ -78,50 +78,80 @@ class EGAT(nn.Module):
 
 
 class HierarchicalPooling(nn.Module):
-    def __init__(self, hidden_dim, pool_ratio=8, max_nodes=1024):
-        """
-        pool_ratio: Tỷ lệ gom nhóm (vd = 8 nghĩa là trung bình 8 axit amin tạo thành 1 patch)
-        """
+    def __init__(self, hidden_dim, pool_ratio=8, max_nodes=1024, num_levels=2):
         super().__init__()
         self.pool_ratio = pool_ratio
         self.max_k = max_nodes // pool_ratio
-        
-        # Học ma trận phân cụm S (Assignment Matrix)
-        self.assign_mat = nn.Linear(hidden_dim, self.max_k)
-        
-        # GCN ở cấp độ vĩ mô (Patch-level)
-        self.macro_gcn = nn.Linear(hidden_dim, hidden_dim)
-        self.layernorm = nn.LayerNorm(hidden_dim)
+        self.num_levels = num_levels
+
+        # Mỗi cấp có assignment matrix riêng
+        self.assign_mats = nn.ModuleList([
+            nn.Linear(hidden_dim, max_nodes // (pool_ratio ** (i+1)))
+            for i in range(num_levels)
+        ])
+
+        # GCN ở mỗi cấp macro — dùng 2 lớp thay vì 1
+        self.macro_gcns = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            for _ in range(num_levels)
+        ])
+
+        # Gated fusion để đưa thông tin macro trở lại micro
+        # Thay vì chỉ cộng, dùng gate học được
+        self.fusion_gates = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(2 * hidden_dim, hidden_dim),
+                nn.Sigmoid()
+            )
+            for _ in range(num_levels)
+        ])
+
+        self.layernorms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim) for _ in range(num_levels)
+        ])
 
     def forward(self, x, adj):
-        # x: (L, hidden_dim) - Đặc trưng sau khi qua EGAT
-        # adj: (L, L) - Ma trận kề của protein
         L = x.shape[0]
-        K = max(1, L // self.pool_ratio)
-        K = min(K, self.max_k)
         
-        # 1. Tính ma trận gán S: (L, K)
-        # Softmax theo dimension -1 để đảm bảo tổng xác suất 1 node thuộc về các patch = 1
-        S = self.assign_mat(x)[:, :K] 
-        S = torch.softmax(S, dim=-1) 
-        
-        # 2. Graph Pooling (Tạo Super-nodes)
-        # Gom đặc trưng node thành đặc trưng patch
-        X_macro = S.transpose(0, 1) @ x  # (K, hidden_dim)
-        # Tạo ma trận kề giữa các patch
-        A_macro = S.transpose(0, 1) @ adj @ S  # (K, K)
-        
-        # Chuẩn hóa A_macro để tránh bùng nổ gradient
-        rowsum = A_macro.sum(dim=-1, keepdim=True).clamp(min=1e-6)
-        A_macro = A_macro / rowsum
-        
-        # 3. Macro Message Passing (Truyền tin giữa các Patches)
-        X_macro = self.macro_gcn(A_macro @ X_macro)
-        X_macro = F.relu(X_macro)
-        
-        # 4. Graph Unpooling (Broadcast thông tin từ Patch về lại Residues)
-        X_global = S @ X_macro  # (L, hidden_dim)
-        
-        # 5. Kết hợp đặc trưng cục bộ (x) và toàn cục (X_global)
-        out = self.layernorm(x + X_global)
-        return out
+        # Lưu lại x và S ở mỗi cấp để dùng khi top-down
+        level_x   = [x]      # level_x[0] = residue-level
+        level_adj = [adj]
+        S_list    = []
+
+        # Bottom-up
+        for level in range(self.num_levels):
+            x_curr   = level_x[-1]
+            adj_curr = level_adj[-1]
+            L_curr   = x_curr.shape[0]
+            K = max(2, L_curr // self.pool_ratio)
+
+            S = self.assign_mats[level](x_curr)[:, :K]
+            S = torch.softmax(S, dim=-1)
+            S_list.append(S)
+
+            X_macro = S.T @ x_curr
+            A_macro = S.T @ adj_curr @ S
+            rowsum  = A_macro.sum(-1, keepdim=True).clamp(min=1e-6)
+            A_macro = A_macro / rowsum
+            X_macro = self.macro_gcns[level](A_macro @ X_macro)
+
+            level_x.append(X_macro)
+            level_adj.append(A_macro)
+
+        # Top-down: từ cấp cao nhất xuống cấp residue
+        x_top = level_x[-1]
+        for level in reversed(range(len(S_list))):
+            S = S_list[level]
+            x_low  = level_x[level]       # đặc trưng cấp thấp hơn
+            x_down = S @ x_top            # broadcast xuống
+
+            gate = self.fusion_gates[level](
+                torch.cat([x_low, x_down], dim=-1)
+            )
+            x_top = self.layernorms[level](x_low + gate * x_down)
+
+        return x_top  # shape (L, hidden_dim) — về lại cấp residue
