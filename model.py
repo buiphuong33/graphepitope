@@ -38,7 +38,7 @@ class GraphBepi(pl.LightningModule):
             hidden_dim=hidden_dim,
             pool_ratio=4,
             max_nodes=1024,
-            num_levels=2      # 2 cấp: residue → patch → domain
+            num_levels=1      # 2 cấp: residue → patch → domain
         )
         self.feature_gate = nn.Sequential(
             nn.Linear(2*hidden_dim, hidden_dim),
