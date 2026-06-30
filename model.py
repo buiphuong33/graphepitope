@@ -1,11 +1,14 @@
 #model.py
 import os
+import logging
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import torch.nn.functional as F
 from EGAT import EGAT,AE, HierarchicalPooling
 from torch.nn.utils.rnn import pad_sequence,pack_sequence,pack_padded_sequence,pad_packed_sequence
+logger = logging.getLogger(__name__)
+
 class GraphBepi(pl.LightningModule):
     def __init__(
         self, 
@@ -179,11 +182,12 @@ class GraphBepi(pl.LightningModule):
             self.log('val_AUPRC', result['AUPRC'], on_step=False, on_epoch=True, prog_bar=False, logger=True)
             self.log('val_mcc',   result['MCC'],   on_step=False, on_epoch=True, prog_bar=False, logger=True)
             self.log('val_f1',    result['F1'],    on_step=False, on_epoch=True, prog_bar=False, logger=True)
-        print(
-            f"Epoch {self.current_epoch} | "
-            f"val_loss {loss:.4f} | "
-            f"AUROC {result['AUROC']:.4f} | "
-            f"AUPRC {result['AUPRC']:.4f}"
+        logger.info(
+            "Epoch %s | val_loss %.4f | AUROC %.4f | AUPRC %.4f",
+            self.current_epoch,
+            loss.item(),
+            result['AUROC'],
+            result['AUPRC']
         )
 
     def test_step(self, batch, batch_idx):

@@ -1,7 +1,9 @@
 #train.py
 import os
+import sys
 import torch
 import random
+import logging
 import warnings
 import argparse
 import numpy as np
@@ -9,8 +11,8 @@ import pickle as pk
 import pytorch_lightning as pl
 from tool import METRICS
 from model import GraphBepi
-from dataset import PDB,collate_fn,chain
-from torch.utils.data import DataLoader,Dataset
+from dataset import PDB, collate_fn, chain, prepare_dataset_artifacts
+from torch.utils.data import DataLoader, Dataset, random_split
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import Callback,EarlyStopping,ModelCheckpoint
 warnings.simplefilter('ignore')
@@ -29,15 +31,50 @@ parser.add_argument('--seed', type=int, default=2022, help='random seed.')
 parser.add_argument('--batch', type=int, default=4, help='batch size.')
 parser.add_argument('--hidden', type=int, default=256, help='hidden dim.')
 parser.add_argument('--epochs', type=int, default=300, help='max number of epochs.')
-parser.add_argument('--dataset', type=str, default='BCE_633', help='dataset name.')
+parser.add_argument('--dataset', type=str, default='BCE_633', choices=['BCE_633', 'Epitope3D'], help='dataset name.')
 parser.add_argument('--logger', type=str, default='./log', help='logger path.')
 parser.add_argument('--tag', type=str, default='GraphBepi', help='logger name.')
-parser.add_argument('--root', type=str, default='', help='root path.')
+parser.add_argument('--root', type=str, default='', help='root path; overrides automatic dataset root inference.')
+parser.add_argument('--dataset-root', type=str, default=None, help='explicit dataset folder path (e.g. ./data/BCE_633 or ./data/Epitope3D).')
 args = parser.parse_args()
 
 device='cpu' if args.gpu==-1 else f'cuda:{args.gpu}'
 seed_everything(args.seed)
-root=args.root
+
+# Setup logging EARLY before any processing that might fail
+log_name=f'{args.dataset}_{args.tag}'
+log_dir=os.path.join(args.logger, f'{log_name}_{args.fold}')
+os.makedirs(log_dir, exist_ok=True)
+log_file=os.path.join(log_dir, 'train.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info('Starting training')
+logger.info('Log directory: %s', log_dir)
+logger.info('Log file: %s', log_file)
+
+# Prepare dataset AFTER logging is set up
+if args.dataset_root:
+    root = args.dataset_root
+elif args.root:
+    root = args.root
+else:
+    root = os.path.join('data', args.dataset)
+
+logger.info('Preparing dataset artifacts for: %s', args.dataset)
+try:
+    prepare_dataset_artifacts(args.dataset, root, device=device)
+    logger.info('Dataset artifacts prepared successfully')
+except Exception as e:
+    logger.error('Failed to prepare dataset artifacts: %s', str(e), exc_info=True)
+    raise
 
 trainset=PDB(mode='train',fold=args.fold,root=root)
 valset=PDB(mode='val',fold=args.fold,root=root)
@@ -55,11 +92,10 @@ else:
     val_loader = DataLoader(valset, batch_size=args.batch, shuffle=False, collate_fn=collate_fn)
 
 test_loader=DataLoader(testset,batch_size=args.batch,shuffle=False,collate_fn=collate_fn)
-print("Train size:", len(trainset))
-print("Val size:", len(valset))
-print("Test size:", len(testset))
-print("Train loader batches:", len(train_loader))
-log_name=f'{args.dataset}_{args.tag}'
+logger.info("Train size: %s", len(trainset))
+logger.info("Val size: %s", len(valset))
+logger.info("Test size: %s", len(testset))
+logger.info("Train loader batches: %s", len(train_loader))
 
 metrics=METRICS(device)
 model=GraphBepi(
