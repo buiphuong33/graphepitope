@@ -62,9 +62,9 @@ class chain:
         self.sequence=''.join(self.sequence)
     def extract(self, model, device, path):
         # 1. Kiểm tra điều kiện cơ bản
-        if len(self.sequence) > 1024 or model is None:
+        if len(self.sequence) > 1024:
             return
-        
+
         target_file = f'{path}/feat/{self.name}_esmc6b.ts'
         if os.path.exists(target_file):
             return
@@ -72,26 +72,89 @@ class chain:
         # Đảm bảo thư mục tồn tại
         os.makedirs(f'{path}/feat/', exist_ok=True)
 
+        # Two modes supported:
+        #  - remote Forge client (has `encode` and `logits`) -- original flow
+        #  - local ESM model (torch) as fallback
         try:
+            if model is not None and hasattr(model, 'encode') and hasattr(model, 'logits'):
+                # remote client flow
+                with torch.no_grad():
+                    protein = ESMProtein(sequence=self.sequence)
+                    protein_tensor = model.encode(protein)
+                    output = model.logits(protein_tensor, EMBEDDING_CONFIG)
+                    feat = output.embeddings.cpu().squeeze(0)
+                    torch.save(feat, target_file)
+                    return
+
+            # fallback: use local esm model to produce embeddings
+            # Prefer local ESMC models (if installed) before falling back to ESM-2
+            esm_model = None
+            alphabet = None
+            # Try multiple candidate constructors from esm.pretrained
+            pref_names = [
+                'ESMC_6B_202412',
+                'ESMC_600M_202412',
+                'ESMC_300M_202412',
+                'esmc_6b',
+                'esmc_600m',
+                'esmc_300m',
+            ]
+            for name in pref_names:
+                ctor = getattr(esm.pretrained, name, None)
+                if ctor is None:
+                    continue
+                try:
+                    esm_model, alphabet = ctor(device=device)
+                    break
+                except Exception:
+                    try:
+                        esm_model = ctor()
+                        # some ctors return (model, alphabet)
+                        if isinstance(esm_model, tuple) and len(esm_model) == 2:
+                            esm_model, alphabet = esm_model
+                        break
+                    except Exception:
+                        esm_model = None
+                        alphabet = None
+                        continue
+
+            # final fallbacks to esm2 if no esmc available
+            if esm_model is None:
+                try:
+                    esm_model, alphabet = esm.pretrained.esm2_t36_3B_UR50D()
+                except Exception:
+                    esm_model, alphabet = esm.pretrained.esm2_t36_3B()
+
+            batch_converter = alphabet.get_batch_converter()
+            esm_model = esm_model.eval().to(device)
+            _, _, tokens = batch_converter([(self.name, self.sequence)])
             with torch.no_grad():
-                # Bước 1: Đóng gói chuỗi thành ESMProtein
-                protein = ESMProtein(sequence=self.sequence)
-                
-                # Bước 2: Encode thành Tensor (Chạy ở client)
-                protein_tensor = model.encode(protein)
-                
-                # Bước 3: Gọi API lấy Logits/Embeddings (Chạy ở server Forge)
-                output = model.logits(protein_tensor, EMBEDDING_CONFIG)
-                
-                # Bước 4: Lấy embedding ra. 
-                # Thường output.embeddings là một torch.Tensor
-                feat = output.embeddings.cpu().squeeze(0) 
-                
+                # Different model families may return different dict shapes; handle common cases
+                out = esm_model(tokens.to(device))
+                if isinstance(out, dict) and 'representations' in out:
+                    rep_layer = list(out['representations'].keys())[-1]
+                    feat = out['representations'][rep_layer][0, 1:len(self.sequence)+1].cpu()
+                elif hasattr(out, 'representations'):
+                    # some APIs return an object with `.representations`
+                    rep = out.representations
+                    if isinstance(rep, dict):
+                        rep_layer = list(rep.keys())[-1]
+                        feat = rep[rep_layer][0, 1:len(self.sequence)+1].cpu()
+                    else:
+                        feat = rep[0][0, 1:len(self.sequence)+1].cpu()
+                else:
+                    # fallback: try the first returned tensor-like
+                    try:
+                        # assume out["representations"][0] or out[0]
+                        feat = out[0][0, 1:len(self.sequence)+1].cpu()
+                    except Exception:
+                        raise RuntimeError('Unknown model output format from local ESM/ESMC model')
+
                 torch.save(feat, target_file)
-                # print(f"Successfully extracted {self.name}")
+                return
 
         except Exception as e:
-            print(f"❌ Lỗi API tại {self.name}: {e}")
+            print(f"❌ Lỗi trích xuất embedding cho {self.name}: {e}")
 
     def load_saprot(self, path):
         # Load embedding SaProt đã được lưu sẵn (file .pt hoặc .npy)
@@ -107,6 +170,7 @@ class chain:
             self.edge[range(len(self)),range(len(self))]=0
     def get_adj(self,path,dseq=3,dr=10,dlong=5,k=10):
         graph=calcPROgraph(self.sequence,self.coord,dseq,dr,dlong,k)
+        os.makedirs(f'{path}/graph', exist_ok=True)
         torch.save(graph,f'{path}/graph/{self.name}.graph')
     def update(self,pos,amino):
         if amino not in DICT.keys():
@@ -160,6 +224,10 @@ def collate_fn(batch):
     return feats,edges, adjs, labels
 
 def extract_chain(root,pid,chain,force=False):
+    # ensure necessary directories exist to avoid FileNotFoundError on write
+    os.makedirs(f'{root}/purePDB', exist_ok=True)
+    os.makedirs(f'{root}/PDB', exist_ok=True)
+
     if not force and os.path.exists(f'{root}/purePDB/{pid}_{chain}.pdb'):
         return True
     if not os.path.exists(f'{root}/PDB/{pid}.pdb'):

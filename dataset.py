@@ -1,8 +1,9 @@
 #dataset.py
 import os
+import pickle as pk
 import esm
 import esm.sdk
-from esm.sdk import client
+from esm.sdk import esmc_client
 import torch
 import warnings
 import argparse
@@ -11,6 +12,41 @@ import torch.nn.functional as F
 from utils import *
 from torch.utils.data import DataLoader,Dataset
 warnings.simplefilter('ignore')
+
+
+def prepare_dataset_artifacts(dataset_name, root, device='cpu', model=None):
+    os.makedirs(root, exist_ok=True)
+
+    if dataset_name == 'BCE_633':
+        csv_path = os.path.join(root, 'total.csv')
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f'BCE_633 dataset file not found: {csv_path}')
+
+        if not os.path.exists(os.path.join(root, 'total.pkl')):
+            initial('total.csv', root, model=model, device=device, from_native_pdb=True)
+
+        if not os.path.exists(os.path.join(root, 'train.pkl')) or not os.path.exists(os.path.join(root, 'test.pkl')):
+            with open(os.path.join(root, 'total.pkl'), 'rb') as f:
+                samples = pk.load(f)
+            with open(os.path.join(root, 'train.pkl'), 'wb') as f:
+                pk.dump(samples, f)
+            with open(os.path.join(root, 'test.pkl'), 'wb') as f:
+                pk.dump(samples, f)
+
+        if not os.path.exists(os.path.join(root, 'cross-validation.npy')):
+            with open(os.path.join(root, 'total.pkl'), 'rb') as f:
+                samples = pk.load(f)
+            np.save(os.path.join(root, 'cross-validation.npy'), np.arange(len(samples)))
+        return
+
+    if dataset_name == 'Epitope3D':
+        if os.path.exists(os.path.join(root, 'train.pkl')) and os.path.exists(os.path.join(root, 'test.pkl')):
+            return
+        raise FileNotFoundError(
+            'Epitope3D preprocessing files are missing. Run dataset.py first to generate train.pkl/test.pkl.'
+        )
+
+    raise ValueError(f'Unsupported dataset: {dataset_name}')
 
 
 class PDB(Dataset):
@@ -79,7 +115,17 @@ class PDB(Dataset):
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=str, default='./data/Epitope3D', help='dataset path')
+    parser.add_argument(
+        '--root',
+        type=str,
+        default='./data/Epitope3D',
+        help='dataset path'
+    )
+    parser.add_argument(
+        "--dataset",
+        default="Epitope3D",
+        choices=["Epitope3D", "BCE_633"]
+    )
     parser.add_argument('--gpu', type=int, default=0, help='gpu.')
     parser.add_argument('--train_csv', type=str, default='epitope3d_dataset_180_train.csv', 
                         help='Tên file CSV train cho tập epitope3d')
@@ -92,7 +138,6 @@ if __name__ == "__main__":
     os.system(f'cd {root} && mkdir PDB purePDB feat saprot graph')
     # model=None
     import getpass
-    from esm.sdk import client
 
     # 1. Nhập token (Chỉ cần nhập 1 lần khi bắt đầu chạy script)
     token = '5zPJa56XnPf91N4L8yWdMQ'
@@ -100,31 +145,36 @@ if __name__ == "__main__":
     # 2. Khởi tạo Cloud Client (Thay vì Local Model)
     # Model "esmc-6b-2024-12" là bản 6B mới nhất trên Cloud
     print("[INFO] Đang kết nối tới Forge API cho ESM-C 6B...")
-    model = client(
+    model = esmc_client(
         model="esmc-6b-2024-12", 
-        url="https://forge.evolutionaryscale.ai", 
+        url="https://biohub.ai", 
         token=token
     )
     
     print("Model connected successfully!")
+
+    if args.dataset == "BCE_633":
+        print("[INFO] Processing BCE_633...")
+        initial("total.csv", root, model=model, device=device)
     
-    print("[INFO] Đang xử lý tập dữ liệu Epitope3D (Đã chia sẵn Train/Test)...")
+    elif args.dataset == "Epitope3D":
+        print("[INFO] Đang xử lý tập dữ liệu Epitope3D (Đã chia sẵn Train/Test)...")
 
-    print(f"--> Xử lý tập Train: {args.train_csv}")
-    trainset = initial_epitope3D(args.train_csv, root, model, device)
-        
-    print(f"--> Xử lý tập Test: {args.test_csv}")
-    testset = initial_epitope3D(args.test_csv, root, model, device)
-        
-    trainset = [i for i in trainset if len(i) < 1024 and getattr(i, 'label', None) is not None and i.label.sum() > 0]
-    testset = [i for i in testset if len(i) < 1024 and getattr(i, 'label', None) is not None and i.label.sum() > 0]
+        print(f"--> Xử lý tập Train: {args.train_csv}")
+        trainset = initial_epitope3D(args.train_csv, root, model, device)
+            
+        print(f"--> Xử lý tập Test: {args.test_csv}")
+        testset = initial_epitope3D(args.test_csv, root, model, device)
+            
+        trainset = [i for i in trainset if len(i) < 1024 and getattr(i, 'label', None) is not None and i.label.sum() > 0]
+        testset = [i for i in testset if len(i) < 1024 and getattr(i, 'label', None) is not None and i.label.sum() > 0]
 
-    np.random.seed(42) 
-    idx = np.random.permutation(len(trainset))
-    with open(f'{root}/train.pkl','wb') as f:
-        pk.dump(trainset, f)
-    with open(f'{root}/test.pkl','wb') as f:
-        pk.dump(testset, f)
+        np.random.seed(42) 
+        idx = np.random.permutation(len(trainset))
+        with open(f'{root}/train.pkl','wb') as f:
+            pk.dump(trainset, f)
+        with open(f'{root}/test.pkl','wb') as f:
+            pk.dump(testset, f)
 
-    np.save(f'{root}/cross-validation.npy', idx)
-    print(f"[INFO] TỔNG KẾT -> Train: {len(trainset)} chains, Test: {len(testset)} chains, CV idx shape: {idx.shape}")
+        np.save(f'{root}/cross-validation.npy', idx)
+        print(f"[INFO] TỔNG KẾT -> Train: {len(trainset)} chains, Test: {len(testset)} chains, CV idx shape: {idx.shape}")
