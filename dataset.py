@@ -127,9 +127,9 @@ if __name__ == "__main__":
         choices=["Epitope3D", "BCE_633"]
     )
     parser.add_argument('--gpu', type=int, default=0, help='gpu.')
-    parser.add_argument('--train_csv', type=str, default='epitope3d_dataset_180_train.csv', 
+    parser.add_argument('--train_csv', type=str, default='epitope3d_dataset_200_Train.csv', 
                         help='Tên file CSV train cho tập epitope3d')
-    parser.add_argument('--test_csv', type=str, default='epitope3d_dataset_20_test.csv', 
+    parser.add_argument('--test_csv', type=str, default='epitope3d_dataset_45_Blind_Test.csv', 
                         help='Tên file CSV test cho tập epitope3d')
     args = parser.parse_args()
     root = args.root
