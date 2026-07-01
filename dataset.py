@@ -3,7 +3,7 @@ import os
 import pickle as pk
 import esm
 import esm.sdk
-from esm.sdk import esmc_client
+from esm.sdk import client
 import torch
 import warnings
 import argparse
