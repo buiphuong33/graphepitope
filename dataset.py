@@ -6,7 +6,7 @@ import esm.sdk
 from esm.sdk import client
 import torch
 import warnings
-import argparse
+import argparseFes
 import torch.nn as nn
 import torch.nn.functional as F
 from utils import *
@@ -145,7 +145,7 @@ if __name__ == "__main__":
     # 2. Khởi tạo Cloud Client (Thay vì Local Model)
     # Model "esmc-6b-2024-12" là bản 6B mới nhất trên Cloud
     print("[INFO] Đang kết nối tới Forge API cho ESM-C 6B...")
-    model = esmc_client(
+    model = client(
         model="esmc-6b-2024-12", 
         url="https://biohub.ai", 
         token=token
