@@ -388,3 +388,115 @@ def initial_epitope3D(file, root, model=None, device='cpu', from_native_pdb=True
         pk.dump(samples, f)
 
     return samples
+
+def export_tabular(root, out_dir="./tabular", split='all'):
+    """Export per-residue tabular features for XGBoost.
+    Produces: <out_dir>/<split>.npz with arrays: X (N x D), y (N,), names (N,), idx (N,), resn (N,)
+    split: 'train' or 'test' or 'all' (default 'all' -> concatenate train+test)
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    pk_map = {
+        'train': f'{root}/train.pkl',
+        'test': f'{root}/test.pkl',
+        'all': None,
+    }
+    samples = []
+    if split in ('train','test'):
+        p = pk_map[split]
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"{p} not found. Run initial() first to build pickles")
+        with open(p,'rb') as f:
+            samples = pk.load(f)
+    else:
+        # Ưu tiên total.pkl (BCE_633)
+        total_path = os.path.join(root, "total.pkl")
+
+        if os.path.exists(total_path):
+            with open(total_path, "rb") as f:
+                samples = pk.load(f)
+        else:
+            # Epitope3D: ghép train + test
+            files = [
+                os.path.join(root, "train.pkl"),
+                os.path.join(root, "test.pkl")
+            ]
+
+            for p in files:
+                if os.path.exists(p):
+                    with open(p, "rb") as f:
+                        samples += pk.load(f)
+
+    rows_X = []
+    rows_y = []
+    rows_name = []
+    rows_idx = []
+    rows_resn = []
+
+    for s in tqdm(samples, desc='Exporting residues'):
+        # ensure features loaded
+        try:
+            s.load_feat(root)
+            s.load_saprot(root)
+            s.load_adj(root,self_cycle=False)
+        except Exception as e:
+            print(f"[WARN] Failed to load features for {s.name}: {e}")
+            continue
+
+        feat = s.feat.float().cpu().numpy() if isinstance(s.feat, torch.Tensor) else np.array(s.feat)
+        saprot = s.saprot.float().cpu().numpy() if isinstance(s.saprot, torch.Tensor) else np.array(s.saprot)
+
+        adj = s.adj.float().cpu().numpy() if isinstance(s.adj, torch.Tensor) else np.array(s.adj)
+
+        edge = s.edge.float().cpu().numpy() if isinstance(s.edge, torch.Tensor) else np.array(s.edge)
+
+        amino_ids = s.amino.cpu().numpy() if isinstance(s.amino, torch.Tensor) else np.array(s.amino)
+
+        feat_len = feat.shape[0]
+        saprot_len = saprot.shape[0]
+        if feat_len != saprot_len:
+            if feat_len == saprot_len + 2:
+                feat = feat[1:-1]
+            elif saprot_len == feat_len + 2:
+                saprot = saprot[1:-1]
+            else:
+                min_len = min(feat_len, saprot_len)
+                feat = feat[:min_len]
+                saprot = saprot[:min_len]
+
+        L = min(len(s), feat.shape[0], saprot.shape[0])
+        for i in range(L):
+            esm_i = feat[i]
+            saprot_i = saprot[i]
+            deg = float(adj[i].sum())
+            neighbors = adj[i] > 0
+            if neighbors.any():
+                neigh_edge_mean = edge[i, neighbors].mean(axis=0)
+            else:
+                neigh_edge_mean = np.zeros(edge.shape[2], dtype=np.float32)
+            amino_id = float(amino_ids[i])
+            x = np.concatenate([esm_i.astype(np.float32), saprot_i.astype(np.float32), np.array([deg], dtype=np.float32), neigh_edge_mean.astype(np.float32), np.array([amino_id], dtype=np.float32)])
+            rows_X.append(x)
+            rows_y.append(float(s.label[i].item() if isinstance(s.label, torch.Tensor) else s.label[i]))
+            rows_name.append(s.name)
+            rows_idx.append(i)
+            rows_resn.append(s.sequence[i])
+
+    X = np.vstack(rows_X).astype(np.float32)
+    y = np.array(rows_y, dtype=np.uint8)
+    names = np.array(rows_name, dtype=object)
+    idxs = np.array(rows_idx, dtype=np.int32)
+    resn = np.array(rows_resn, dtype=object)
+    out_path = os.path.join(out_dir, f'{split}.npz')
+    np.savez_compressed(out_path, X=X, y=y, names=names, idxs=idxs, resn=resn)
+    print(f"[DONE] Exported {X.shape[0]} residues to {out_path}")
+    return out_path
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--root', type=str, default='/kaggle/input/dataset/data/BCE_633')
+    parser.add_argument('--out', type=str, default='./tabular')
+    parser.add_argument('--split', type=str, default='all', choices=['train','test','all'])
+    args = parser.parse_args()
+    export_tabular(args.root, args.out, args.split)

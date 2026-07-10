@@ -435,3 +435,25 @@
 2026-06-30 14:20:24,840 | INFO | Epoch 182 | val_loss 0.3053 | AUROC 0.7222 | AUPRC 0.2322
 2026-06-30 14:23:45,071 | INFO | Epoch 183 | val_loss 0.3066 | AUROC 0.7197 | AUPRC 0.2304
 2026-06-30 14:27:06,843 | INFO | Epoch 184 | val_loss 0.3064 | AUROC 0.7204 | AUPRC 0.2291
+2026-07-01 17:12:03,618 | INFO | Starting training
+2026-07-01 17:12:03,618 | INFO | Log directory: ./log/BCE_633_GraphBepi_1
+2026-07-01 17:12:03,618 | INFO | Log file: ./log/BCE_633_GraphBepi_1/train.log
+2026-07-01 17:12:03,618 | INFO | Preparing dataset artifacts for: BCE_633
+2026-07-01 17:12:03,618 | ERROR | Failed to prepare dataset artifacts: BCE_633 dataset file not found: data/Epitope3D/total.csv
+Traceback (most recent call last):
+  File "/home/s24gbn1/Documents/phg/GraphBepi-reconstruction/train.py", line 73, in <module>
+    prepare_dataset_artifacts(args.dataset, root, device=device)
+  File "/home/s24gbn1/Documents/phg/GraphBepi-reconstruction/dataset.py", line 23, in prepare_dataset_artifacts
+    raise FileNotFoundError(f'BCE_633 dataset file not found: {csv_path}')
+FileNotFoundError: BCE_633 dataset file not found: data/Epitope3D/total.csv
+2026-07-01 17:27:45,748 | INFO | Starting training
+2026-07-01 17:27:45,748 | INFO | Log directory: ./log/BCE_633_GraphBepi_1
+2026-07-01 17:27:45,748 | INFO | Log file: ./log/BCE_633_GraphBepi_1/train.log
+2026-07-01 17:27:45,748 | INFO | Preparing dataset artifacts for: BCE_633
+2026-07-01 17:27:45,987 | INFO | Dataset artifacts prepared successfully
+2026-07-01 17:27:50,047 | INFO | Train size: 570
+2026-07-01 17:27:50,047 | INFO | Val size: 63
+2026-07-01 17:27:50,047 | INFO | Test size: 633
+2026-07-01 17:27:50,047 | INFO | Train loader batches: 142
+2026-07-01 17:27:50,522 | INFO | Epoch 0 | val_loss 1.2946 | AUROC 0.4480 | AUPRC 0.1149
+2026-07-01 17:28:00,947 | INFO | Epoch 0 | val_loss 0.3533 | AUROC 0.5756 | AUPRC 0.1350

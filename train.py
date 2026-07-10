@@ -26,7 +26,7 @@ def seed_everything(seed=2022):
 parser = argparse.ArgumentParser()
 parser.add_argument('--lr', type=float, default=1e-6, help='learning rate.')
 parser.add_argument('--gpu', type=int, default=0, help='gpu.')
-parser.add_argument('--fold', type=int, default=1, help='dataset fold. set it -1 to use the whole trainset')
+parser.add_argument('--fold', type=int, default=-1, help='dataset fold. set it -1 to use the whole trainset')
 parser.add_argument('--seed', type=int, default=2022, help='random seed.')
 parser.add_argument('--batch', type=int, default=4, help='batch size.')
 parser.add_argument('--hidden', type=int, default=256, help='hidden dim.')
@@ -76,30 +76,72 @@ except Exception as e:
     logger.error('Failed to prepare dataset artifacts: %s', str(e), exc_info=True)
     raise
 
-trainset=PDB(mode='train',fold=args.fold,root=root)
-valset=PDB(mode='val',fold=args.fold,root=root)
-testset=PDB(mode='test',fold=args.fold,root=root)
-
-if args.fold == -1:
-    # Split trainset into train and val (80% train, 20% val)
-    train_size = int(0.8 * len(trainset))
-    val_size = len(trainset) - train_size
-    train_subset, val_subset = random_split(trainset, [train_size, val_size])
-    train_loader = DataLoader(train_subset, batch_size=args.batch, shuffle=True, collate_fn=collate_fn, drop_last=True)
-    val_loader = DataLoader(val_subset, batch_size=args.batch, shuffle=False, collate_fn=collate_fn)
-else:
+# Sau khi tạo dataset
+if args.dataset == 'BCE_633':
+    # BCE_633: Giữ nguyên logic GraphBepi
+    trainset = PDB(mode='train', fold=args.fold, root=root, use_cv=True)
+    valset = PDB(mode='val', fold=args.fold, root=root, use_cv=True)
+    testset = PDB(mode='test', root=root, use_cv=False)
+    
     train_loader = DataLoader(trainset, batch_size=args.batch, shuffle=True, collate_fn=collate_fn, drop_last=True)
     val_loader = DataLoader(valset, batch_size=args.batch, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(testset, batch_size=args.batch, shuffle=False, collate_fn=collate_fn)
+    
+    if args.fold == -1:
+        val_loader = test_loader  # ✅ Logic GraphBepi cho BCE_633
+        
+    logger.info(f"BCE_633 - Fold {args.fold}: Train={len(trainset)}, Val={len(valset)}, Test={len(testset)}")
+    
+else:  # Epitope3D
+    # Epitope3D: Không dùng CV, split train/val
+    trainset = PDB(mode='train', root=root, use_cv=False)
+    testset = PDB(mode='test', root=root, use_cv=False)
+    
+    if args.fold == -1:
+        # Chia train set thành train/val (80/20)
+        train_size = int(0.8 * len(trainset))
+        val_size = len(trainset) - train_size
+        train_subset, val_subset = random_split(
+            trainset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(args.seed)
+        )
+        
+        train_loader = DataLoader(
+            train_subset, 
+            batch_size=args.batch, 
+            shuffle=True, 
+            collate_fn=collate_fn, 
+            drop_last=True
+        )
+        val_loader = DataLoader(
+            val_subset, 
+            batch_size=args.batch, 
+            shuffle=False, 
+            collate_fn=collate_fn
+        )
+        test_loader = DataLoader(
+            testset, 
+            batch_size=args.batch, 
+            shuffle=False, 
+            collate_fn=collate_fn
+        )
+        logger.info(f"Epitope3D - Full: Train={len(train_subset)}, Val={len(val_subset)}, Test={len(testset)}")
+    else:
+        # Nếu có fold thì dùng CV (nhưng Epitope3D không cần)
+        logger.warning("Epitope3D doesn't support cross-validation folds. Using full training.")
+        # Fallback: dùng toàn bộ train
+        train_loader = DataLoader(trainset, batch_size=args.batch, shuffle=True, collate_fn=collate_fn, drop_last=True)
+        val_loader = DataLoader(testset, batch_size=args.batch, shuffle=False, collate_fn=collate_fn)
+        test_loader = DataLoader(testset, batch_size=args.batch, shuffle=False, collate_fn=collate_fn)
 
-test_loader=DataLoader(testset,batch_size=args.batch,shuffle=False,collate_fn=collate_fn)
-logger.info("Train size: %s", len(trainset))
-logger.info("Val size: %s", len(valset))
-logger.info("Test size: %s", len(testset))
-logger.info("Train loader batches: %s", len(train_loader))
+
+# test_loader=DataLoader(testset,batch_size=args.batch,shuffle=False,collate_fn=collate_fn)
+
 
 metrics=METRICS(device)
 model=GraphBepi(
-    feat_dim=2560,                     # esm2 representation dim
+    feat_dim=2560,                     # esmc representation dim
     hidden_dim=args.hidden,            # hidden representation dim
     exfeat_dim=1280,                   # saprot feature dim
     edge_dim=51,                       # edge feature dim

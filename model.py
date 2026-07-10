@@ -91,13 +91,7 @@ class GraphBepi(pl.LightningModule):
         return self.mlp(h)
 
     def embed(self, V, edge):
-        """Return per-residue embeddings from the model (before final MLP).
-        Input:
-            V: list of tensors (L_i x D)
-            edge: list of tensors (L_i x L_i x edge_dim)
-        Output:
-            List of tensors [ (L_i x H) ] where H = concat(LSTM_out_dim + GCN_out_dim)
-        """
+        
         was_train = self.training
         self.eval()
         with torch.no_grad():
@@ -120,29 +114,62 @@ class GraphBepi(pl.LightningModule):
             self.train()
         return h_list
 
-    def embed_gnn_only(self, V, edge):
-        """Return per-residue embeddings produced by GNN only (W_v/W_u1 + EGAT), skipping LSTM.
-        Input/Output like embed(): returns a list of tensors [(L_i x H), ...]
+    def embed_stage1(self, V, edge, adj):
+        """
+        Return embeddings produced by the complete Stage-1 encoder:
+            W_v
+            + W_u1
+            + Feature Gate
+            + EGAT
+            + HierarchicalPooling
+
+        Output:
+            List[(L_i, hidden_dim)]
         """
         was_train = self.training
         self.eval()
+
         with torch.no_grad():
             V = pad_sequence(V, batch_first=True, padding_value=0).float()
+
             mask = V.sum(-1) != 0
             mask_lens = mask.sum(1)
-            feats = self.W_v(V[:,:,:-self.exfeat_dim])
-            exfeats = self.W_u1(V[:,:,-self.exfeat_dim:])
-            gcn_outs = []
+
+            feats = self.W_v(V[:, :, :-self.exfeat_dim])
+            exfeats = self.W_u1(V[:, :, -self.exfeat_dim:])
+
+            outputs = []
+
             for i in range(len(V)):
-                E = self.edge_linear(edge[i]).permute(2,0,1)
-                x1 = feats[i,:mask_lens[i]]
-                x2 = exfeats[i,:mask_lens[i]]
-                x = torch.cat([x1, x2], -1)
-                x_gcn, _ = self.gat(x, E)
-                gcn_outs.append(x_gcn)
+                # Edge features
+                E = self.edge_linear(edge[i]).permute(2, 0, 1)
+
+                # Adjacency normalization
+                A = adj[i].to(V.device).float()
+                deg = A.sum(-1, keepdim=True).clamp(min=1)
+                A_norm = A / deg
+
+                # Remove padding
+                x1 = feats[i, :mask_lens[i]]
+                x2 = exfeats[i, :mask_lens[i]]
+
+                # Feature Gate
+                x_cat = torch.cat([x1, x2], dim=-1)
+                gate = torch.softmax(self.feature_gate(x_cat), dim=-1)
+                x = gate[:, 0:1] * x1 + gate[:, 1:2] * x2
+
+                # EGAT
+                x, _ = self.gat(x, E)
+
+                # Hierarchical Pooling
+                x = self.hpool(x, A_norm)
+
+                outputs.append(x)
+
         if was_train:
             self.train()
-        return gcn_outs
+
+        return outputs
     def training_step(self, batch, batch_idx): 
         feat, edge, adj, y = batch
         pred = self(feat, edge, adj).squeeze(-1)
