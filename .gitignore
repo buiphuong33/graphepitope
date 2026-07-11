@@ -11,4 +11,4 @@ foldseek/
 model/
 foldseek-linux-avx2.tar.gz
 foldseek-linux-avx2.tar.gz.1
-venv/
+backup_large_files/
