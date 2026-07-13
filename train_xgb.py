@@ -3,10 +3,10 @@ import os
 import sys
 import argparse
 import numpy as np
-from utils import export_tabular
+from utils import export_tabular, export_gnn_embeddings, merge_tabular_and_gnn
 from tool import METRICS
 import joblib
-from sklearn.model_selection import train_test_split, GroupShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit
 import xgboost as xgb
 import torch
 import logging
@@ -23,7 +23,6 @@ def setup_logging(log_dir, log_name=None, log_level=logging.INFO):
     
     log_path = os.path.join(log_dir, log_name)
     
-    # Cấu hình logging
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s | %(levelname)s | %(message)s',
@@ -35,54 +34,90 @@ def setup_logging(log_dir, log_name=None, log_level=logging.INFO):
     return logging.getLogger(__name__), log_path
 
 
-def load_or_export(root, out_dir, split, use_gnn=False, pca_dim=0, logger=None):
-    """Load hoặc export dữ liệu tabular"""
-    if logger:
-        logger.info("Loading/exporting data...")
-    
-    # prefer merged file if using GNN embeddings
-    merged_path = os.path.join(out_dir, f'{split}_merged.npz')
-    if use_gnn and os.path.exists(merged_path):
-        if logger:
-            logger.info(f"Using merged features from {merged_path}")
-        return np.load(merged_path, allow_pickle=True)
-
-    path = os.path.join(out_dir, f'{split}.npz')
-    if not os.path.exists(path):
-        if logger:
-            logger.info(f"{path} not found, exporting via utils.export_tabular...")
-        export_tabular(root, out_dir, split='all' if split == 'all' else split)
-    
-    data = np.load(path, allow_pickle=True)
-    if logger:
-        logger.info(f"Loaded data from {path}: X={data['X'].shape}, y={data['y'].shape}")
-
-    # if requested and merged not present, try to merge automatically
-    if use_gnn:
-        from merge_tabular_and_gnn import merge
-        if logger:
-            logger.info(f'Merging tabular and GNN embeddings (PCA dim: {pca_dim})')
-        merged_path, pca_model = merge(out_dir, split, pca_dim)
-        data = np.load(merged_path, allow_pickle=True)
-        if logger:
-            logger.info(f"Loaded merged data: X={data['X'].shape}, y={data['y'].shape}")
-
-    return data
-
-
 def print_metrics(logger, metrics_dict, prefix=""):
     """Helper function để in metrics một cách an toàn"""
     if not metrics_dict:
         logger.warning(f"{prefix} No metrics available")
         return
     
-    # Các metrics có thể có
     metric_names = ['F1', 'MCC', 'Precision', 'Recall', 'Accuracy', 'Sensitivity', 'Specificity', 'threshold']
-    
     for name in metric_names:
         if name in metrics_dict:
             logger.info(f"  {prefix}{name}: {metrics_dict[name]:.6f}")
 
+
+def load_or_export(root, out_dir, split, use_gnn=False, pca_dim=64, 
+                   ckpt=None, gpu=0, batch=8, logger=None, process_all=False):
+    """
+    Load hoặc export dữ liệu:
+    - Nếu use_gnn=True: export GNN embeddings → merge → load merged
+    - Nếu use_gnn=False: chỉ export tabular → load tabular
+    - Nếu process_all=True và split='train': xử lý cả train và test
+    """
+    if logger:
+        logger.info("="*50)
+        logger.info("PREPARING DATA")
+        logger.info("="*50)
+    
+    # Xác định các split cần xử lý
+    if process_all and split == 'train':
+        splits_to_process = ['train', 'test']
+        if logger:
+            logger.info(f"Processing both train and test splits (process_all=True)")
+    else:
+        splits_to_process = [split]
+    
+    # Step 1: Export tabular features cho tất cả splits
+    for sp in splits_to_process:
+        tab_path = os.path.join(out_dir, f'{sp}.npz')
+        if not os.path.exists(tab_path):
+            if logger:
+                logger.info(f"Exporting tabular features for {sp}...")
+            export_tabular(root, out_dir, split=sp)
+        else:
+            if logger:
+                logger.info(f"Tabular features for {sp} already exist: {tab_path}")
+    
+    # Step 2: Nếu dùng GNN, export GNN embeddings và merge cho tất cả splits
+    if use_gnn:
+        if ckpt is None:
+            raise ValueError("--ckpt is required when --use-gnn is enabled")
+        
+        for sp in splits_to_process:
+            # Export GNN embeddings
+            gnn_path = os.path.join(out_dir, f'gnn_{sp}_stage1.npz')
+            if not os.path.exists(gnn_path):
+                if logger:
+                    logger.info(f"Exporting GNN embeddings for {sp}...")
+                export_gnn_embeddings(ckpt, root, out_dir, sp, batch, gpu)
+            else:
+                if logger:
+                    logger.info(f"GNN embeddings for {sp} already exist: {gnn_path}")
+            
+            # Merge
+            merged_path = os.path.join(out_dir, f'{sp}_merged.npz')
+            if not os.path.exists(merged_path):
+                if logger:
+                    logger.info(f"Merging features for {sp}...")
+                merge_tabular_and_gnn(out_dir, sp, pca_dim, out_dir)
+            else:
+                if logger:
+                    logger.info(f"Merged features for {sp} already exist: {merged_path}")
+    
+    # Load dữ liệu cho split được chỉ định
+    if use_gnn:
+        data_path = os.path.join(out_dir, f'{split}_merged.npz')
+    else:
+        data_path = os.path.join(out_dir, f'{split}.npz')
+    
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Data file not found: {data_path}")
+    
+    data = np.load(data_path, allow_pickle=True)
+    if logger:
+        logger.info(f"Loaded data: X={data['X'].shape}, y={data['y'].shape}")
+    
+    return data
 
 def main(args):
     # 1. SETUP LOGGING
@@ -99,13 +134,19 @@ def main(args):
     os.makedirs(args.out, exist_ok=True)
     os.makedirs(os.path.dirname(args.out_model) if os.path.dirname(args.out_model) else '.', exist_ok=True)
     
-    # 2. LOAD DATA
-    logger.info("\n" + "-"*50)
-    logger.info("STEP 1: LOADING DATA")
-    logger.info("-"*50)
-    
-    data = load_or_export(args.root, args.out, args.split, 
-                          use_gnn=args.use_gnn, pca_dim=args.pca_dim, logger=logger)
+    # 2. LOAD/EXPORT DATA
+    data = load_or_export(
+        root=args.root,
+        out_dir=args.out,
+        split=args.split,
+        use_gnn=args.use_gnn,
+        pca_dim=args.pca_dim,
+        ckpt=args.ckpt,
+        gpu=args.gpu,
+        batch=args.batch,
+        logger=logger,
+        process_all=args.process_all
+    )
     
     X = data['X']
     y = data['y']
@@ -144,19 +185,34 @@ def main(args):
     elif args.split == 'train':
         logger.info("Using train set from file...")
         X_train, y_train, names_train = X, y, names
-        test_path = os.path.join(args.out, 'test_merged.npz' if args.use_gnn else 'test.npz')
-        
-        if not os.path.exists(test_path):
-            logger.warning('test.npz not found! Splitting 20% from train for test')
-            gss_test = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-            train_idx, test_idx = next(gss_test.split(X_train, y_train, groups=names_train))
-            X_train, X_test = X_train[train_idx], X_train[test_idx]
-            y_train, y_test = y_train[train_idx], y_train[test_idx]
-            names_train = names_train[train_idx]
+        if args.process_all:
+            test_path = os.path.join(args.out, 'test_merged.npz' if args.use_gnn else 'test.npz')
+            if os.path.exists(test_path):
+                logger.info(f"Loading test set from: {test_path}")
+                test = np.load(test_path, allow_pickle=True)
+                X_test, y_test = test['X'], test['y']
+                logger.info(f"Loaded test set: {len(X_test)} residues")
+            else:
+                logger.warning(f"Test file not found: {test_path}. Splitting 20% from train for test")
+                gss_test = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+                train_idx, test_idx = next(gss_test.split(X_train, y_train, groups=names_train))
+                X_train, X_test = X_train[train_idx], X_train[test_idx]
+                y_train, y_test = y_train[train_idx], y_train[test_idx]
+                names_train = names_train[train_idx]
         else:
-            logger.info(f"Loading test set from: {test_path}")
-            test = np.load(test_path, allow_pickle=True)
-            X_test, y_test = test['X'], test['y']
+            # Logic cũ: tìm test file hoặc split
+            test_path = os.path.join(args.out, 'test_merged.npz' if args.use_gnn else 'test.npz')
+            if not os.path.exists(test_path):
+                logger.warning('test.npz not found! Splitting 20% from train for test')
+                gss_test = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+                train_idx, test_idx = next(gss_test.split(X_train, y_train, groups=names_train))
+                X_train, X_test = X_train[train_idx], X_train[test_idx]
+                y_train, y_test = y_train[train_idx], y_train[test_idx]
+                names_train = names_train[train_idx]
+            else:
+                logger.info(f"Loading test set from: {test_path}")
+                test = np.load(test_path, allow_pickle=True)
+                X_test, y_test = test['X'], test['y']
         
         logger.info(f"Train set: {len(X_train)} residues from {len(np.unique(names_train))} proteins")
         logger.info(f"  Positive: {(y_train==1).sum()} ({(y_train==1).sum()/len(y_train)*100:.2f}%)")
@@ -268,19 +324,11 @@ def main(args):
         )
 
         logger.info("Training...")
-        
-        # Fit với verbose để log quá trình training
-        clf.fit(
-            X_tr, y_tr, 
-            eval_set=eval_set,
-            verbose=args.log_interval
-        )
+        clf.fit(X_tr, y_tr, eval_set=eval_set, verbose=args.log_interval)
 
-        # Log kết quả
         logger.info(f"\n[{hp['name']}] Training completed!")
         logger.info(f"  Best iteration: {clf.best_iteration}")
         
-        # Lấy best score từ evals_result
         evals_result = clf.evals_result()
         if evals_result and 'validation_0' in evals_result:
             val_auc = evals_result['validation_0']['auc']
@@ -291,7 +339,6 @@ def main(args):
                 logger.info(f"  Best AUROC: {best_auroc:.6f}")
                 logger.info(f"  Best AUPRC: {best_auprc:.6f}")
 
-        # Lưu model
         base, ext = os.path.splitext(args.out_model)
         model_path = f"{base}_m{i+1}_seed{seed}{ext}"
         dirn = os.path.dirname(model_path)
@@ -300,7 +347,6 @@ def main(args):
         joblib.dump(clf, model_path)
         logger.info(f"  Model saved to: {model_path}")
         
-        # Dự đoán trên validation
         val_pred = clf.predict_proba(X_val)[:, 1]
         metrics_val = METRICS(device='cpu')
         val_res = metrics_val.calc_prc(torch.tensor(val_pred), torch.tensor(y_val))
@@ -310,7 +356,6 @@ def main(args):
         logger.info(f"  Val metrics:")
         print_metrics(logger, val_thr, "    ")
         
-        # Dự đoán trên test
         probas.append(clf.predict_proba(X_test)[:, 1])
         
         model_results.append({
@@ -340,17 +385,13 @@ def main(args):
     logger.info("ENSEMBLE PERFORMANCE")
     logger.info("-"*50)
     
-    # AUROC & AUPRC
     res = metrics.calc_prc(pred_t, y_t)
     logger.info(f"AUROC: {res['AUROC']:.6f}")
     logger.info(f"AUPRC: {res['AUPRC']:.6f}")
     
-    # Thresholded metrics
     thr_metrics = metrics(pred_t, y_t)
     logger.info(f"\nWith optimal threshold (maximizing F1):")
     logger.info(f"  Threshold: {thr_metrics.get('threshold', 'N/A')}")
-    
-    # In tất cả metrics một cách an toàn
     logger.info("  Metrics:")
     for key, value in thr_metrics.items():
         if isinstance(value, (int, float)):
@@ -363,12 +404,10 @@ def main(args):
     logger.info("STEP 6: SAVING RESULTS")
     logger.info("-"*50)
     
-    # Save predictions
     pred_path = os.path.join(args.out, 'xgb_test_preds.npz')
     np.savez_compressed(pred_path, proba=proba, y=y_test)
     logger.info(f"Predictions saved to: {pred_path}")
     
-    # Save detailed results
     results = {
         'timestamp': datetime.now().isoformat(),
         'dataset': args.dataset,
@@ -417,8 +456,14 @@ if __name__ == '__main__':
     parser.add_argument('--out', type=str, default='./tabular')
     parser.add_argument('--split', type=str, default='train', choices=['train', 'all'])
     parser.add_argument('--out-model', type=str, default='./model/xgb_model.joblib')
+    
+    # GNN arguments
     parser.add_argument('--use-gnn', action='store_true', help='Use GNN embeddings merged into features')
-    parser.add_argument('--pca-dim', type=int, default=10, help='PCA dim for GNN embeddings (fit on train)')
+    parser.add_argument('--ckpt', type=str, default=None, help='GNN checkpoint path (required if --use-gnn)')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU for GNN embedding extraction')
+    parser.add_argument('--batch', type=int, default=8, help='Batch size for GNN embedding extraction')
+    parser.add_argument('--pca-dim', type=int, default=64, help='PCA dim for GNN embeddings (fit on train)')
+    
     parser.add_argument('--seeds', type=str, default='42,202,777',
                         help='Comma-separated random seeds for ensemble (e.g., 42,202,777)')
     
@@ -434,9 +479,14 @@ if __name__ == '__main__':
     parser.add_argument('--early_stopping', type=int, default=50, help='Early stopping rounds')
     parser.add_argument('--log_interval', type=int, default=10, help='Log every N epochs (verbose parameter)')
     
+    parser.add_argument('--process-all', action='store_true', 
+                    help='Process both train and test splits')
     args = parser.parse_args()
     
-    # Convert log level string to constant
+    # Validate: nếu dùng GNN thì phải có checkpoint
+    if args.use_gnn and args.ckpt is None:
+        parser.error("--ckpt is required when --use-gnn is enabled")
+    
     log_level = getattr(logging, args.log_level.upper())
     args.log_level = log_level
     

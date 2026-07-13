@@ -5,10 +5,9 @@ lightning_logs/
 __pycache__/
 *.pyc
 logs/
-BCE_633/
-Epitope3D/
 foldseek/
 model/
 foldseek-linux-avx2.tar.gz
 foldseek-linux-avx2.tar.gz.1
 backup_large_files/
+tabular/

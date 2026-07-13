@@ -12,20 +12,14 @@ from tqdm import tqdm,trange
 from preprocess import *
 from graph_construction import calcPROgraph
 import requests as rq
+import joblib
+from sklearn.decomposition import PCA
 from esm.sdk.api import ESMProtein, LogitsConfig
 EMBEDDING_CONFIG = LogitsConfig(
     sequence=True, 
     return_embeddings=True 
 )
-# prot_amino2id={
-#     '<pad>': 0, '</s>': 1, '<unk>': 2, 'A': 3,
-#     'L': 4, 'G': 5, 'V': 6, 'S': 7,
-#     'R': 8, 'E': 9, 'D': 10, 'T': 11,
-#     'I': 12, 'P': 13, 'K': 14, 'F': 15,
-#     'Q': 16, 'N': 17, 'Y': 18, 'M': 19,
-#     'H': 20, 'W': 21, 'C': 22, 'X': 23,
-#     'B': 24, 'O': 25, 'U': 26, 'Z': 27
-# }
+
 amino2id={
     '<null_0>': 0, '<pad>': 1, '<eos>': 2, '<unk>': 3,
     'L': 4, 'A': 5, 'G': 6, 'V': 7, 'S': 8, 'E': 9, 'R': 10, 
@@ -492,11 +486,254 @@ def export_tabular(root, out_dir="./tabular", split='all'):
     return out_path
 
 
+# ==================== EXPORT GNN EMBEDDINGS (TỪ export_gnn_emb.py) ====================
+def load_model(ckpt, device='cpu'):
+    """Load GraphBepi model từ checkpoint"""
+    from model import GraphBepi
+    m = GraphBepi()
+    state = torch.load(ckpt, map_location=device)
+    if 'state_dict' in state:
+        m.load_state_dict(state['state_dict'])
+    else:
+        m.load_state_dict(state)
+    m.to(device)
+    m.eval()
+    return m
+
+
+def export_gnn_embeddings(ckpt, root, out_dir='./tabular', split='train', 
+                          batch=8, gpu=-1, gnn_only=False, limit=None):
+    """Export GNN embeddings từ checkpoint đã train"""
+    from dataset import PDB
+    
+    device = 'cpu' if gpu == -1 or not torch.cuda.is_available() else f'cuda:{gpu}'
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"[INFO] Loading model {ckpt} on {device}")
+    model = load_model(ckpt, device=device)
+
+    dataset = PDB(mode=split, fold=-1, root=root)
+
+    names_out = []
+    idxs_out = []
+    resn_out = []
+    emb_out = []
+
+    count = 0
+    for start in range(0, len(dataset), batch):
+        end = min(start + batch, len(dataset))
+        batch_samples = dataset.data[start:end]
+        V_list = []
+        E_list = []
+        A_list = []
+        valid_samples = []
+
+        for s in batch_samples:
+            try:
+                s.load_feat(root)
+                s.load_saprot(root)
+                s.load_adj(root)
+            except Exception as e:
+                print(f"[WARN] Skip {s.name} due to feature/graph error: {repr(e)}")
+                continue
+
+            if s.feat is None or s.saprot is None:
+                print(f"[WARN] Skip {s.name}: missing feat/saprot")
+                continue
+
+            feat_len = s.feat.shape[0]
+            saprot_len = s.saprot.shape[0]
+
+            if feat_len != saprot_len:
+                if feat_len == saprot_len + 2:
+                    print(f"[FIXED] {s.name}: Cắt 2 token dư (feat {feat_len} -> {saprot_len})")
+                    s.feat = s.feat[1:-1]
+                elif saprot_len == feat_len + 2:
+                    print(f"[FIXED] {s.name}: Cắt 2 token dư (saprot {saprot_len} -> {feat_len})")
+                    s.saprot = s.saprot[1:-1]
+                else:
+                    min_len = min(feat_len, saprot_len)
+                    print(f"[WARN] Skip {s.name}: feat len {feat_len} != saprot len {saprot_len}")
+                    s.feat = s.feat[:min_len]
+                    s.saprot = s.saprot[:min_len]
+
+            L = s.feat.shape[0]
+            if len(s.sequence) < L:
+                print(f"[WARN] Skip {s.name}: sequence len {len(s.sequence)} < feat len {L}")
+                continue
+
+            V_list.append(torch.cat([s.feat, s.saprot], 1))
+            E_list.append(s.edge)
+            A_list.append(s.adj)
+            valid_samples.append(s)
+
+        if len(valid_samples) == 0:
+            continue
+
+        V_list = [v.to(device) for v in V_list]
+        E_list = [e.to(device) for e in E_list]
+        A_list = [a.to(device) for a in A_list]
+
+        with torch.no_grad():
+            h_list = model.embed_stage1(V_list, E_list, A_list)
+
+        for s, h in zip(valid_samples, h_list):
+            h_cpu = h.cpu().numpy()
+            L = h_cpu.shape[0]
+            for i in range(L):
+                names_out.append(s.name)
+                idxs_out.append(i)
+                resn_out.append(s.sequence[i])
+                emb_out.append(h_cpu[i])
+                count += 1
+                if limit is not None and count >= limit:
+                    break
+            if limit is not None and count >= limit:
+                break
+
+    emb_arr = np.vstack(emb_out).astype(np.float32)
+    names_arr = np.array(names_out, dtype=object)
+    idxs_arr = np.array(idxs_out, dtype=np.int32)
+    resn_arr = np.array(resn_out, dtype=object)
+
+    suffix = '_stage1' if gnn_only else ''
+    out_path = os.path.join(out_dir, f'gnn_{split}{suffix}.npz')
+    np.savez_compressed(out_path, emb=emb_arr, names=names_arr, idxs=idxs_arr, resn=resn_arr)
+    print(f"[DONE] Exported GNN embeddings to {out_path} (shape {emb_arr.shape})")
+    return out_path
+
+
+# ==================== MERGE TABULAR + GNN (TỪ merge_tabular_and_gnn.py) ====================
+def merge_tabular_and_gnn(tabular_dir='./tabular', split='train', pca_dim=64, 
+                          out_dir=None, pca_model_path=None):
+    """Merge tabular features với GNN embeddings và áp dụng PCA"""
+    if out_dir is None:
+        out_dir = tabular_dir
+    
+    tab_path = os.path.join(tabular_dir, f'{split}.npz')
+    gnn_candidates = [
+        os.path.join(tabular_dir, f'gnn_{split}_stage1.npz'),
+        os.path.join(tabular_dir, f'gnn_{split}.npz')
+    ]
+    gnn_path = None
+    for candidate in gnn_candidates:
+        if os.path.exists(candidate):
+            gnn_path = candidate
+            break
+    
+    if not os.path.exists(tab_path):
+        raise FileNotFoundError(f"Tabular file {tab_path} not found. Run export_tabular first.")
+    if gnn_path is None:
+        raise FileNotFoundError(f"GNN embeddings not found. Run export_gnn_embeddings first.")
+
+    tab = np.load(tab_path, allow_pickle=True)
+    gnn = np.load(gnn_path, allow_pickle=True)
+    print(f"[INFO] Merging using GNN file: {gnn_path}")
+
+    X = tab['X']
+    y = tab['y'] if 'y' in tab else None
+    names = tab['names']
+    idxs = tab['idxs']
+    resn = tab['resn']
+
+    emb = gnn['emb']
+    emb_names = gnn['names']
+    emb_idxs = gnn['idxs']
+
+    # Build mapping: (protein_name, residue_idx) -> embedding index
+    emb_map = {(n, int(i)): j for j, (n, i) in enumerate(zip(emb_names, emb_idxs))}
+
+    merged_emb = []
+    missing = 0
+    for n, i in zip(names, idxs):
+        key = (n, int(i))
+        j = emb_map.get(key, None)
+        if j is None:
+            missing += 1
+            merged_emb.append(np.zeros(emb.shape[1], dtype=np.float32))
+        else:
+            merged_emb.append(emb[j])
+    merged_emb = np.vstack(merged_emb)
+
+    # PCA
+    pca_out_path = os.path.join(out_dir, f'pca_{split}_{pca_dim}.joblib')
+    if pca_dim is not None and pca_dim > 0:
+        if split in ['train', 'all'] and pca_model_path is None:
+            print(f"[INFO] Fitting PCA ({pca_dim} dims)...")
+            pca = PCA(n_components=pca_dim, random_state=42)
+            emb_reduced = pca.fit_transform(merged_emb)
+            joblib.dump(pca, pca_out_path)
+            print(f"[DONE] PCA saved to {pca_out_path}")
+            pca_model_used = pca_out_path
+        else:
+            if pca_model_path is None:
+                guess = os.path.join(out_dir, f"pca_train_{pca_dim}.joblib")
+                if not os.path.exists(guess):
+                    guess = os.path.join(out_dir, f"pca_all_{pca_dim}.joblib")
+                if os.path.exists(guess):
+                    pca_model_path = guess
+            if pca_model_path is None or not os.path.exists(pca_model_path):
+                raise FileNotFoundError("Cannot find PCA model.")
+            pca = joblib.load(pca_model_path)
+            emb_reduced = pca.transform(merged_emb)
+            pca_model_used = pca_model_path
+    else:
+        emb_reduced = merged_emb
+        pca_model_used = None
+
+    X_merged = np.concatenate([X.astype(np.float32), emb_reduced.astype(np.float32)], axis=1)
+    out_path = os.path.join(out_dir, f'{split}_merged.npz')
+    np.savez_compressed(out_path, X=X_merged, y=y, names=names, idxs=idxs, resn=resn)
+    print(f"[DONE] Wrote merged features to {out_path} (X shape {X_merged.shape}). Missing emb rows: {missing}")
+    return out_path, pca_model_used
+
+# if __name__ == '__main__':
+#     import argparse
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument('--root', type=str, default='/kaggle/input/dataset/data/BCE_633')
+#     parser.add_argument('--out', type=str, default='./tabular')
+#     parser.add_argument('--split', type=str, default='all', choices=['train','test','all'])
+#     args = parser.parse_args()
+#     export_tabular(args.root, args.out, args.split)
+
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=str, default='/kaggle/input/dataset/data/BCE_633')
-    parser.add_argument('--out', type=str, default='./tabular')
-    parser.add_argument('--split', type=str, default='all', choices=['train','test','all'])
+    
+    parser = argparse.ArgumentParser(description='Utils for GraphBepi')
+    subparsers = parser.add_subparsers(dest='command', help='Sub-commands')
+    
+    # Command: export_tabular
+    parser_tab = subparsers.add_parser('export_tabular')
+    parser_tab.add_argument('--root', type=str, default='/kaggle/input/dataset/data/BCE_633')
+    parser_tab.add_argument('--out', type=str, default='./tabular')
+    parser_tab.add_argument('--split', type=str, default='all', choices=['train', 'test', 'all'])
+    
+    # Command: export_gnn
+    parser_gnn = subparsers.add_parser('export_gnn')
+    parser_gnn.add_argument('--ckpt', type=str, required=True)
+    parser_gnn.add_argument('--root', type=str, default='/kaggle/input/dataset/data/BCE_633')
+    parser_gnn.add_argument('--out', type=str, default='./tabular')
+    parser_gnn.add_argument('--split', type=str, default='train', choices=['train', 'val', 'test', 'all'])
+    parser_gnn.add_argument('--batch', type=int, default=8)
+    parser_gnn.add_argument('--gpu', type=int, default=0)
+    parser_gnn.add_argument('--gnn-only', action='store_true')
+    parser_gnn.add_argument('--limit', type=int, default=None)
+    
+    # Command: merge
+    parser_merge = subparsers.add_parser('merge')
+    parser_merge.add_argument('--tabular', type=str, default='./tabular')
+    parser_merge.add_argument('--split', type=str, default='train', choices=['train', 'test', 'all'])
+    parser_merge.add_argument('--pca-dim', type=int, default=64)
+    parser_merge.add_argument('--out', type=str, default=None)
+    parser_merge.add_argument('--pca-model', type=str, default=None)
+    
     args = parser.parse_args()
-    export_tabular(args.root, args.out, args.split)
+    
+    if args.command == 'export_tabular':
+        export_tabular(args.root, args.out, args.split)
+    elif args.command == 'export_gnn':
+        export_gnn_embeddings(args.ckpt, args.root, args.out, args.split, 
+                              args.batch, args.gpu, args.gnn_only, args.limit)
+    elif args.command == 'merge':
+        merge_tabular_and_gnn(args.tabular, args.split, args.pca_dim, args.out, args.pca_model)
+    else:
+        parser.print_help()
